@@ -300,32 +300,36 @@ class FundService:
         [V3.8] 终极工业版 - 彻底解决 0 和 None 值的显示 Bug
         [V4.6] 全面防御性编程 - 防止所有 NoneType 错误
         [V6.2] 支持自选过滤加快性能
+        [V8.1] 性能加速：无 watchlist 时跳过逐只实时拉取与外网请求
         """
         conn = self.db._get_conn()
+        watchlist_set = {str(w) for w in (watchlist or [])}
+        full_dashboard = not bool(watchlist_set)
         try:
             funds_df = pd.read_sql_query("SELECT fund_code, fund_name, category, related_index, pos_ratio, idx_code, idx_name FROM unified_fund_list", conn)
-            if watchlist and not funds_df.empty:
-                watchlist_strs = [str(w) for w in watchlist]
-                funds_df = funds_df[funds_df['fund_code'].astype(str).isin(watchlist_strs)]
-            
+            if not watchlist_set:
+                funds_df = funds_df[~funds_df['fund_code'].astype(str).isin(['161125', '161130'])]
+            else:
+                funds_df = funds_df[funds_df['fund_code'].astype(str).isin(watchlist_set)]
+
             # 从 fund_info 表读取用户爬虫获取的状态和费率
             status_df = pd.read_sql_query("SELECT fund_code, purchase_status, redemption_status, purchase_fee, redemption_fee FROM fund_info", conn)
             status_dict = status_df.set_index('fund_code').to_dict('index')
-            
+
             if funds_df is None or funds_df.empty:
                 logger.warning("未获取到基金列表，返回空数据")
                 return []
-            
+
             # 【V7.0 工业级升级】 批量预取所有跟踪指数的日内涨跌幅，用于加速国内LOF与QDII亚洲的实时估值计算
             all_related_indices = funds_df['related_index'].dropna().tolist()
-            index_changes_map = prefetch_index_changes(all_related_indices)
+            index_changes_map = prefetch_index_changes(all_related_indices) if not full_dashboard else {}
 
             result = []
             for _, fund in funds_df.iterrows():
                 if fund is None:
                     continue
                 code = fund['fund_code']
-                
+
                 # 1. 获取历史记录 (找锚点)
                 query_metrics = f"""
                     SELECT date, price, nav, static_val, premium as static_premium,
@@ -336,14 +340,14 @@ class FundService:
                 """
                 metrics_df = pd.read_sql_query(query_metrics, conn)
                 metrics = {'price': 0, 'nav': 0, 'static_val': 0, 'static_premium': 0, 'rt_val': None, 'rt_premium': None}
-                
+
                 if not metrics_df.empty:
                     # 关键：锁定最新有效净值日期
                     valid_navs = metrics_df[metrics_df['nav'] > 0]
                     if not valid_navs.empty:
                         metrics['nav'] = valid_navs.iloc[0]['nav']
                         metrics['nav_date'] = valid_navs.iloc[0]['date']
-                    
+
                     # 锁定最新静态估值
                     valid_vals = metrics_df[metrics_df['static_val'] > 0]
                     if not valid_vals.empty and float(valid_vals.iloc[0]['static_val']) > 0:
@@ -355,17 +359,17 @@ class FundService:
                             metrics['static_val'] = val
                     else:
                         metrics['static_val'] = metrics.get('nav', 0)
-                    
+
                     # 历史价格兜底
                     valid_prices = metrics_df.dropna(subset=['price'])
                     if not valid_prices.empty:
                         metrics['price'] = valid_prices.iloc[0]['price']
-                        
+
                     # 恢复基本面的缺失字段 (成交额、份额、换手率等)
                     for col in ['volume', 'shares', 'shares_added', 'turnover_rate']:
                         valid_series = metrics_df.dropna(subset=[col])
                         metrics[col] = float(valid_series.iloc[0][col]) if not valid_series.empty else 0.0
-                        
+
                     # 🚀 动态计算缺失的“新增(万)”份额
                     if metrics.get('shares_added') == 0.0:
                         valid_shares = metrics_df.dropna(subset=['shares'])
@@ -373,7 +377,7 @@ class FundService:
                             shares_t = float(valid_shares.iloc[0]['shares'])
                             shares_t1 = float(valid_shares.iloc[1]['shares'])
                             metrics['shares_added'] = float(shares_t - shares_t1)
-                            
+
                     # 🚀 动态计算缺失的“换手率”
                     if metrics.get('turnover_rate') == 0.0:
                         vol = metrics.get('volume', 0)
@@ -392,7 +396,8 @@ class FundService:
                         metrics['prev_close'] = 0
 
                 # 2. [V4.0] 灵魂逻辑：现价必须从实时接口获取（毫秒级），用于套利计算
-                if self.market_data_service:
+                # [V8.1] 性能优化：全量看板场景下跳过逐只实时拉取，只做轻量历史快照
+                if self.market_data_service and not full_dashboard:
                     try:
                         rt = self.market_data_service.get_realtime_quote(code)
                         if rt and rt.get('price'):
@@ -401,184 +406,186 @@ class FundService:
                                 metrics['volume'] = rt['amount']
                     except Exception as e:
                         logger.error(f"Error getting realtime quote for {code}: {e}")
-                
+
                 # 3. [V6.1 核心机制升级] 永远优先实时计算最新估值，仅在实时计算失败时才从采样表进行历史兜底
                 metrics['rt_val'] = None
                 metrics['rt_premium'] = None
-                
+
                 # 尝试实时计算估值
-                try:
-                    # 3.1 【白银基金 161226 特殊行情特判】 - 完全同步自程序 1（东财 SSE 接口）的稳定算法
-                    if code == '161226':
-                        import requests
-                        ag_future_price, settlement_price, vwap = 0.0, 0.0, 0.0
-                        
-                        # [优先级1] 本程序自带的东财SSE长连接阅读器（最精准，无需程序1）
-                        if _sse_reader.ag0_price > 0 and _sse_reader.ag0_settlement > 0:
-                            ag_future_price = _sse_reader.ag0_price
-                            settlement_price = _sse_reader.ag0_settlement
-                            vwap = _sse_reader.ag0_vwap
-                        
-                        # [优先级2] 若SSE还没数据（刚启动），尝试从程序1(5000端口)获取
-                        if ag_future_price <= 0 or settlement_price <= 0:
-                            try:
-                                r = requests.get("http://127.0.0.1:5000/api/futures", timeout=1.0)
-                                if r.status_code == 200:
-                                    f_data = r.json()
-                                    ag0 = f_data.get('AG0', {})
-                                    ag_future_price = float(ag0.get('price', 0))
-                                    settlement_price = float(ag0.get('settlement', 0))
-                                    vwap = float(ag0.get('vwap', 0))
-                            except:
-                                pass
-                        
-                        # [优先级3] 降级：新浪 nf_AG0 接口兜底
-                        if ag_future_price <= 0 or settlement_price <= 0:
-                            try:
-                                headers = {'Referer': 'https://finance.sina.com.cn/'}
-                                r = requests.get("http://hq.sinajs.cn/list=nf_AG0", headers=headers, timeout=1.5)
-                                if r.status_code == 200 and '="' in r.text:
-                                    parts = r.text.split('"')[1].split(',')
-                                    if len(parts) >= 11:
-                                        ag_future_price = float(parts[8])   # 最新价
-                                        settlement_price = float(parts[10])  # 昨结算价
-                                        # 新浪接口 part[9] 即为今日动态结算均价(VWAP)
-                                        vwap = float(parts[9]) if len(parts) > 9 else 0.0
-                            except:
-                                pass
-                                
-                        nav_home = float(metrics.get('nav', 0))
-                        if ag_future_price > 0 and settlement_price > 0 and nav_home > 0:
-                            # 🚀 为了让前端展示 AG0 盘口数据
-                            metrics['ag0_price'] = ag_future_price
-                            metrics['ag0_settlement'] = settlement_price
-                            
-                            # 参考估值 (rt_val) = 昨天净值 * (实时成交价 / 昨结算价)
-                            rt_val = nav_home * (ag_future_price / settlement_price)
-                            metrics['rt_val'] = round(rt_val, 4)
-                            if metrics['price'] > 0:
-                                metrics['rt_premium'] = round((metrics['price'] / rt_val - 1) * 100, 3)
-                                
-                            # 🚀 官方估值 (static_val) = 昨天净值 * (VWAP / 昨结算价)
-                            if vwap > 0:
-                                metrics['static_val'] = round(nav_home * (vwap / settlement_price), 4)
-                            else:
-                                # 如果盘中没取到 vwap，就降级为 NAV (避免出现脏数据)
-                                metrics['static_val'] = nav_home
-                                
-                            # 联动计算官方溢价
-                            if metrics['static_val'] > 0 and metrics.get('price', 0) > 0:
-                                metrics['static_premium'] = round((metrics['price'] / metrics['static_val'] - 1) * 100, 3)
+                # [V8.1] 性能优化：全量看板（无 watchlist）时只走历史快照，跳过逐只实时估值和 161226 外部 HTTP
+                if not full_dashboard:
+                    try:
+                        # 3.1 【白银基金 161226 特殊行情特判】 - 完全同步自程序 1（东财 SSE 接口）的稳定算法
+                        if code == '161226':
+                            import requests
+                            ag_future_price, settlement_price, vwap = 0.0, 0.0, 0.0
 
+                            # [优先级1] 本程序自带的东财SSE长连接阅读器（最精准，无需程序1）
+                            if _sse_reader.ag0_price > 0 and _sse_reader.ag0_settlement > 0:
+                                ag_future_price = _sse_reader.ag0_price
+                                settlement_price = _sse_reader.ag0_settlement
+                                vwap = _sse_reader.ag0_vwap
 
-                    # 3.2 【普通国内LOF/QDII亚洲极速估值】 - 直连新浪指数接口，不占用美股 API，免去自选条件直接计算
-                    if not metrics.get('rt_val'):
-                        rel_idx = fund.get('related_index')
-                        nav_home = float(metrics.get('nav', 0))
-                        if rel_idx and rel_idx != '-' and nav_home > 0:
-                            idx_data = index_changes_map.get(rel_idx)
-                            pct = 0.0
-                            if idx_data is not None and isinstance(idx_data, dict):
-                                pct = idx_data.get('pct', 0.0)
-                                metrics['index_close'] = idx_data.get('price', 0.0)
-                            else:
-                                pct = get_index_change_percent(rel_idx)
-                            
-                            # 🚀 把最新涨跌幅赋值给 metrics 供看板展示
-                            metrics['index_pct'] = pct
-                            
-                            if pct != 0.0:
-                                pos = float(fund.get('pos_ratio') or 0.95)
-                                rt_val = nav_home * (1.0 + pos * (pct / 100.0))
+                            # [优先级2] 若SSE还没数据（刚启动），尝试从程序1(5000端口)获取
+                            if ag_future_price <= 0 or settlement_price <= 0:
+                                try:
+                                    r = requests.get("http://127.0.0.1:5000/api/futures", timeout=1.0)
+                                    if r.status_code == 200:
+                                        f_data = r.json()
+                                        ag0 = f_data.get('AG0', {})
+                                        ag_future_price = float(ag0.get('price', 0))
+                                        settlement_price = float(ag0.get('settlement', 0))
+                                        vwap = float(ag0.get('vwap', 0))
+                                except:
+                                    pass
+
+                            # [优先级3] 降级：新浪 nf_AG0 接口兜底
+                            if ag_future_price <= 0 or settlement_price <= 0:
+                                try:
+                                    headers = {'Referer': 'https://finance.sina.com.cn/'}
+                                    r = requests.get("http://hq.sinajs.cn/list=nf_AG0", headers=headers, timeout=1.5)
+                                    if r.status_code == 200 and '="' in r.text:
+                                        parts = r.text.split('"')[1].split(',')
+                                        if len(parts) >= 11:
+                                            ag_future_price = float(parts[8])   # 最新价
+                                            settlement_price = float(parts[10])  # 昨结算价
+                                            # 新浪接口 part[9] 即为今日动态结算均价(VWAP)
+                                            vwap = float(parts[9]) if len(parts) > 9 else 0.0
+                                except:
+                                    pass
+
+                            nav_home = float(metrics.get('nav', 0))
+                            if ag_future_price > 0 and settlement_price > 0 and nav_home > 0:
+                                # 🚀 为了让前端展示 AG0 盘口数据
+                                metrics['ag0_price'] = ag_future_price
+                                metrics['ag0_settlement'] = settlement_price
+
+                                # 参考估值 (rt_val) = 昨天净值 * (实时成交价 / 昨结算价)
+                                rt_val = nav_home * (ag_future_price / settlement_price)
                                 metrics['rt_val'] = round(rt_val, 4)
-                                if metrics.get('price', 0) > 0:
+                                if metrics['price'] > 0:
                                     metrics['rt_premium'] = round((metrics['price'] / rt_val - 1) * 100, 3)
 
-                    # 3.3 【美股原油/黄金等高价值一篮子基金】 - 保持原有基于 lof_config.yaml 的矩阵公式推演
-                    calculator = self._get_calculator() if not metrics.get('rt_val') else None
-                    if calculator:
-                        # 获取基金配置(动态从数据库构建，彻底废弃 yaml)
-                        fund_cfg = {
-                            "code": code,
-                            "trade_etf": fund.get('related_index', ''),
-                            "holdings": {"equity_ratio": float(fund.get('pos_ratio') or 0.95) * 100},
-                            "trade_future": "CL" if "原油" in str(fund.get('fund_name')) else ("GC" if "金" in str(fund.get('fund_name')) else ("AG0" if "白银" in str(fund.get('fund_name')) else ""))
-                        }
-                        try:
-                            basket_df = pd.read_sql("SELECT underlying_symbol as symbol, weight FROM fund_basket_weights WHERE fund_code=? AND date = (SELECT MAX(date) FROM fund_basket_weights WHERE fund_code=?)", conn, params=(code, code))
-                            if not basket_df.empty:
-                                fund_cfg["valuation_portfolio"] = basket_df.to_dict('records')
-                        except:
-                            pass
-                        
-                        if fund_cfg:
-                            # 获取最新汇率
-                            current_fx = None 
+                                # 🚀 官方估值 (static_val) = 昨天净值 * (VWAP / 昨结算价)
+                                if vwap > 0:
+                                    metrics['static_val'] = round(nav_home * (vwap / settlement_price), 4)
+                                else:
+                                    # 如果盘中没取到 vwap，就降级为 NAV (避免出现脏数据)
+                                    metrics['static_val'] = nav_home
+
+                                # 联动计算官方溢价
+                                if metrics['static_val'] > 0 and metrics.get('price', 0) > 0:
+                                    metrics['static_premium'] = round((metrics['price'] / metrics['static_val'] - 1) * 100, 3)
+
+
+                        # 3.2 【普通国内LOF/QDII亚洲极速估值】 - 直连新浪指数接口，不占用美股 API，免去自选条件直接计算
+                        if not metrics.get('rt_val'):
+                            rel_idx = fund.get('related_index')
+                            nav_home = float(metrics.get('nav', 0))
+                            if rel_idx and rel_idx != '-' and nav_home > 0:
+                                idx_data = index_changes_map.get(rel_idx)
+                                pct = 0.0
+                                if idx_data is not None and isinstance(idx_data, dict):
+                                    pct = idx_data.get('pct', 0.0)
+                                    metrics['index_close'] = idx_data.get('price', 0.0)
+                                else:
+                                    pct = get_index_change_percent(rel_idx)
+
+                                # 🚀 把最新涨跌幅赋值给 metrics 供看板展示
+                                metrics['index_pct'] = pct
+
+                                if pct != 0.0:
+                                    pos = float(fund.get('pos_ratio') or 0.95)
+                                    rt_val = nav_home * (1.0 + pos * (pct / 100.0))
+                                    metrics['rt_val'] = round(rt_val, 4)
+                                    if metrics.get('price', 0) > 0:
+                                        metrics['rt_premium'] = round((metrics['price'] / rt_val - 1) * 100, 3)
+
+                        # 3.3 【美股原油/黄金等高价值一篮子基金】 - 保持原有基于 lof_config.yaml 的矩阵公式推演
+                        calculator = self._get_calculator() if not metrics.get('rt_val') else None
+                        if calculator:
+                            # 获取基金配置(动态从数据库构建，彻底废弃 yaml)
+                            fund_cfg = {
+                                "code": code,
+                                "trade_etf": fund.get('related_index', ''),
+                                "holdings": {"equity_ratio": float(fund.get('pos_ratio') or 0.95) * 100},
+                                "trade_future": "CL" if "原油" in str(fund.get('fund_name')) else ("GC" if "金" in str(fund.get('fund_name')) else ("AG0" if "白银" in str(fund.get('fund_name')) else ""))
+                            }
                             try:
-                                fx_df = pd.read_sql(
-                                    "SELECT usd_cny_mid FROM exchange_rate ORDER BY date DESC LIMIT 1",
-                                    conn
-                                )
-                                if not fx_df.empty and fx_df.iloc[0]['usd_cny_mid'] > 0:
-                                    current_fx = fx_df.iloc[0]['usd_cny_mid']
+                                basket_df = pd.read_sql("SELECT underlying_symbol as symbol, weight FROM fund_basket_weights WHERE fund_code=? AND date = (SELECT MAX(date) FROM fund_basket_weights WHERE fund_code=?)", conn, params=(code, code))
+                                if not basket_df.empty:
+                                    fund_cfg["valuation_portfolio"] = basket_df.to_dict('records')
                             except:
                                 pass
-                            
-                            if current_fx and current_fx > 0:
-                                # 获取实时 ETF 价格
-                                current_etfs = {}
-                                if self.market_data_service:
-                                    portfolio = fund_cfg.get('valuation_portfolio', [])
-                                    for item in portfolio:
-                                        sym = item.get('symbol', '').replace('^', '')
-                                        # 去掉地区后缀，得到基础代码 USO/GLD
-                                        for suffix in ['-EU', '-JP', '-HK']:
-                                            if sym.endswith(suffix):
-                                                sym = sym[:-len(suffix)]
-                                                break
-                                        q = self.market_data_service.get_realtime_quote(sym)
-                                        if q and q.get('price'):
-                                            current_etfs[sym] = q['price']
-                                
-                                # 计算实时估值
-                                res = calculator.calculate(fund_cfg, current_fx, current_etfs)
-                                val_res = res.get('rt_val') if res else None
-                                if val_res and val_res > 0:
-                                    metrics['rt_val'] = round(val_res, 4)
-                                    # 重新计算溢价率
-                                    if metrics['price'] > 0:
-                                        metrics['rt_premium'] = round((metrics['price'] / metrics['rt_val'] - 1) * 100, 3)
-                                
-                                # 尝试基于指数的实时估值 (QDII亚洲, 国内指数等)
-                                if not val_res:
-                                    tracking_index = fund_cfg.get('tracking_index')
-                                    if tracking_index and self.market_data_service:
-                                        q = self.market_data_service.get_realtime_quote(tracking_index)
-                                        if q and q.get('price') and q.get('price') > 0:
-                                            idx_price = q['price']
-                                            base_data = calculator.get_base_data(code)
-                                            if base_data and base_data.get('index_close') and base_data['index_close'] > 0:
-                                                index_b = base_data['index_close']
-                                                b_nav = base_data.get('nav', 0)
-                                                position = base_data.get('position', 1.0)
-                                                if pd.isna(position):
-                                                    position = fund_cfg.get('holdings', {}).get('equity_ratio', 100.0) / 100.0
-                                                
-                                                fx_ratio = 1.0
-                                                # 如果支持获取汇率日内波动，可以在这里添加 fx_ratio = 1 + fx_pct / 100
-                                                index_ratio = idx_price / index_b
-                                                
-                                                # 🚀 把最新指数价格和涨跌幅赋值给 metrics 供看板展示
-                                                metrics['index_close'] = idx_price
-                                                metrics['index_pct'] = (index_ratio - 1) * 100
-                                                
-                                                val_res = b_nav * (1 + position * (index_ratio * fx_ratio - 1))
-                                                if val_res > 0:
-                                                    metrics['rt_val'] = round(val_res, 4)
-                                                    if metrics['price'] > 0:
-                                                        metrics['rt_premium'] = round((metrics['price'] / metrics['rt_val'] - 1) * 100, 3)
-                except Exception as e:
-                    logger.error(f"实时计算 {code} 估值失败: {e}")
+
+                            if fund_cfg:
+                                # 获取最新汇率
+                                current_fx = None
+                                try:
+                                    fx_df = pd.read_sql(
+                                        "SELECT usd_cny_mid FROM exchange_rate ORDER BY date DESC LIMIT 1",
+                                        conn
+                                    )
+                                    if not fx_df.empty and fx_df.iloc[0]['usd_cny_mid'] > 0:
+                                        current_fx = fx_df.iloc[0]['usd_cny_mid']
+                                except:
+                                    pass
+
+                                if current_fx and current_fx > 0:
+                                    # 获取实时 ETF 价格
+                                    current_etfs = {}
+                                    if self.market_data_service:
+                                        portfolio = fund_cfg.get('valuation_portfolio', [])
+                                        for item in portfolio:
+                                            sym = item.get('symbol', '').replace('^', '')
+                                            # 去掉地区后缀，得到基础代码 USO/GLD
+                                            for suffix in ['-EU', '-JP', '-HK']:
+                                                if sym.endswith(suffix):
+                                                    sym = sym[:-len(suffix)]
+                                                    break
+                                            q = self.market_data_service.get_realtime_quote(sym)
+                                            if q and q.get('price'):
+                                                current_etfs[sym] = q['price']
+
+                                    # 计算实时估值
+                                    res = calculator.calculate(fund_cfg, current_fx, current_etfs)
+                                    val_res = res.get('rt_val') if res else None
+                                    if val_res and val_res > 0:
+                                        metrics['rt_val'] = round(val_res, 4)
+                                        # 重新计算溢价率
+                                        if metrics['price'] > 0:
+                                            metrics['rt_premium'] = round((metrics['price'] / metrics['rt_val'] - 1) * 100, 3)
+
+                                    # 尝试基于指数的实时估值 (QDII亚洲, 国内指数等)
+                                    if not val_res:
+                                        tracking_index = fund_cfg.get('tracking_index')
+                                        if tracking_index and self.market_data_service:
+                                            q = self.market_data_service.get_realtime_quote(tracking_index)
+                                            if q and q.get('price') and q.get('price') > 0:
+                                                idx_price = q['price']
+                                                base_data = calculator.get_base_data(code)
+                                                if base_data and base_data.get('index_close') and base_data['index_close'] > 0:
+                                                    index_b = base_data['index_close']
+                                                    b_nav = base_data.get('nav', 0)
+                                                    position = base_data.get('position', 1.0)
+                                                    if pd.isna(position):
+                                                        position = fund_cfg.get('holdings', {}).get('equity_ratio', 100.0) / 100.0
+
+                                                    fx_ratio = 1.0
+                                                    # 如果支持获取汇率日内波动，可以在这里添加 fx_ratio = 1 + fx_pct / 100
+                                                    index_ratio = idx_price / index_b
+
+                                                    # 🚀 把最新指数价格和涨跌幅赋值给 metrics 供看板展示
+                                                    metrics['index_close'] = idx_price
+                                                    metrics['index_pct'] = (index_ratio - 1) * 100
+
+                                                    val_res = b_nav * (1 + position * (index_ratio * fx_ratio - 1))
+                                                    if val_res > 0:
+                                                        metrics['rt_val'] = round(val_res, 4)
+                                                        if metrics['price'] > 0:
+                                                            metrics['rt_premium'] = round((metrics['price'] / metrics['rt_val'] - 1) * 100, 3)
+                    except Exception as e:
+                        logger.error(f"实时计算 {code} 估值失败: {e}")
 
                 # [V6.1] 备用兜底：如果实时计算失败（例如未连行情源，或美股休市无最新价），从采样表获取最近一次的记录
                 if not metrics.get('rt_val') or metrics['rt_val'] <= 0:

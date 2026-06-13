@@ -362,14 +362,14 @@ app.add_middleware(
 )
 
 @app.get("/api/health")
-async def get_health():
+def get_health():
     return {"status": "ok", "db": root_db_path}
 
 # [V6.0] 存储前端传递的最新自选基金列表（用于采样服务过滤）
 # (已在服务初始化前定义)
 
 @app.get("/api/dashboard")
-async def get_dashboard(watchlist: str = None):
+def get_dashboard(watchlist: str = None):
     """Unified dashboard data for both LOF and JSL
     [V6.0] 接收前端传递的自选基金列表，用于采样服务过滤
     """
@@ -394,7 +394,7 @@ async def get_dashboard(watchlist: str = None):
         return JSONResponse(status_code=500, content={"status": "error", "message": msg})
 
 @app.get("/api/market/overview")
-async def get_market():
+def get_market():
     try:
         data = fund_service.get_market_overview(market_data_service=market_data_service)
         return {"status": "ok", "data": data}
@@ -403,28 +403,28 @@ async def get_market():
         return {"status": "error", "message": str(e)}
 
 @app.get("/api/system/milestones")
-async def get_system_milestones():
+def get_system_milestones():
     """获取系统运行里程碑日志"""
     return {"status": "ok", "data": system_status.get_milestones()}
 
 @app.get("/api/fund/{code}/history")
-async def get_fund_history(code: str):
+def get_fund_history(code: str):
     data = fund_service.get_fund_history(code)
     return {"status": "ok", "data": data}
 
 @app.get("/api/fund/{code}/intraday")
-async def get_fund_intraday(code: str, date: str = None):
+def get_fund_intraday(code: str, date: str = None):
     """获取基金的分时数据（曲线图用）"""
     data = fund_service.get_fund_intraday(code, date)
     return {"status": "ok", "data": data}
 
 @app.get("/api/fund/{code}/basket")
-async def get_fund_basket(code: str):
+def get_fund_basket(code: str):
     data = fund_service.get_fund_basket(code)
     return {"status": "ok", "data": data}
 
 @app.get("/api/fund/{code}/valuation_meta")
-async def get_fund_valuation_meta(code: str):
+def get_fund_valuation_meta(code: str):
     try:
         # 1. 获取数据库中的基金信息
         conn = fund_service.db._get_conn()
@@ -648,7 +648,7 @@ async def get_fund_valuation_meta(code: str):
 
 # --- Core Fund Configuration (YAML) APIs ---
 @app.get("/api/config/funds")
-async def get_all_fund_configs():
+def get_all_fund_configs():
     """获取 lof_config.yaml 中的所有基金配置"""
     cfg = config_manager_service.load_config()
     return {"status": "ok", "data": cfg.get('funds', [])}
@@ -661,14 +661,14 @@ async def upsert_fund_config(request: Request):
     return {"status": "ok" if success else "error"}
 
 @app.delete("/api/config/funds/{code}")
-async def delete_fund_config(code: str):
+def delete_fund_config(code: str):
     """从 YAML 中删除基金"""
     success = config_manager_service.delete_fund_config(code)
     return {"status": "ok" if success else "error"}
 
 # --- Private / Custom Export APIs ---
 @app.get("/api/private/status")
-async def get_private_status():
+def get_private_status():
     """检测私密插件是否挂载"""
     return {"status": "ok", "loaded": export_service is not None}
 
@@ -692,7 +692,7 @@ async def export_fund_data(code: str):
 
 # --- Ledger / Bookkeeping APIs ---
 @app.get("/api/ledger/trades")
-async def get_ledger_trades(status: str = 'ACTIVE'):
+def get_ledger_trades(status: str = 'ACTIVE'):
     data = ledger_service.get_all_trades(status=status)
     return {"status": "ok", "data": data}
 
@@ -703,13 +703,13 @@ async def add_ledger_trade(request: Request):
     return {"status": "ok" if success else "error"}
 
 @app.post("/api/ledger/trades/close/{trade_id}")
-async def close_ledger_trade(trade_id: int):
+def close_ledger_trade(trade_id: int):
     success = ledger_service.close_trade(trade_id)
     return {"status": "ok" if success else "error"}
 
 # --- Fee & Commission Management APIs ---
 @app.get("/api/config/fees/{code}")
-async def get_fund_fees(code: str):
+def get_fund_fees(code: str):
     data = ledger_service.get_fund_fees(code)
     return {"status": "ok", "data": data}
 
@@ -721,7 +721,7 @@ async def upsert_fund_fee(request: Request):
 
 # --- Trading & Position APIs ---
 @app.get("/api/trading/positions")
-async def get_trading_positions():
+def get_trading_positions():
     """获取真实账户持仓"""
     try:
         data = trading_service.get_positions()
@@ -730,7 +730,7 @@ async def get_trading_positions():
         return JSONResponse(status_code=500, content={"status": "error", "message": str(e)})
 
 @app.get("/api/trading/balance")
-async def get_trading_balance():
+def get_trading_balance():
     """获取账户余额"""
     data = trading_service.get_balance()
     return {"status": "ok", "data": data}
@@ -749,7 +749,7 @@ async def place_manual_order(request: Request):
     return res
 
 @app.post("/api/system/reconnect_ib")
-async def reconnect_ib():
+def reconnect_ib():
     if market_data_service.ib_reader:
         connected = market_data_service.ib_reader.connect_to_ib()
         if connected:
@@ -773,7 +773,7 @@ async def reconnect_ib():
             return {"status": "error", "message": "Failed to initialize IB"}
 
 @app.post("/api/system/reconnect_engine")
-async def reconnect_engine():
+def reconnect_engine():
     res = market_data_service.restart_realtime_engine()
     return res
 
@@ -842,7 +842,7 @@ async def trigger_task(task: str):
 
 # --- Auto Trade Engine APIs ---
 @app.get("/api/auto_trade/rules")
-async def get_auto_trade_rules():
+def get_auto_trade_rules():
     return {"status": "ok", "rules": auto_trade_runner.engine.rules}
 
 @app.post("/api/auto_trade/rules/add")
@@ -858,7 +858,7 @@ async def update_auto_trade_rule(rule_id: str, request: Request):
     return {"status": "ok" if success else "error"}
 
 @app.delete("/api/auto_trade/rules/{rule_id}")
-async def delete_auto_trade_rule(rule_id: str):
+def delete_auto_trade_rule(rule_id: str):
     auto_trade_runner.engine.delete_rule(rule_id)
     return {"status": "ok"}
 
@@ -872,7 +872,7 @@ async def update_all_rules(request: Request):
     return JSONResponse(status_code=400, content={"status": "error", "message": "Missing 'rules' in payload"})
 
 @app.get("/api/auto_trade/status")
-async def get_auto_trade_status():
+def get_auto_trade_status():
     return {"status": "ok", "running": auto_trade_runner.running}
 
 @app.post("/api/auto_trade/toggle")
@@ -890,12 +890,12 @@ async def toggle_auto_trade_engine(request: Request):
     return JSONResponse(status_code=400, content={"status": "error", "message": "Invalid action"})
 
 @app.get("/api/auto_trade/logs")
-async def get_auto_trade_logs():
+def get_auto_trade_logs():
     return {"status": "ok", "logs": auto_trade_runner.get_recent_logs()}
 
 # --- Data Source Config APIs ---
 @app.get("/api/config/data_sources")
-async def get_data_sources(module: str = "realtime_market"):
+def get_data_sources(module: str = "realtime_market"):
     data = config_service.get_data_sources(module)
     return {"status": "ok", "data": data}
 
@@ -924,19 +924,19 @@ async def update_priorities(request: Request):
 
 # --- Market Data APIs ---
 @app.get("/api/market/realtime/{code}")
-async def get_realtime_quote(code: str):
+def get_realtime_quote(code: str):
     quote = market_data_service.get_realtime_quote(code)
     if quote:
         return {"status": "ok", "data": quote}
     return JSONResponse(status_code=404, content={"status": "error", "message": "Quote not found"})
 
 @app.get("/api/market/historical/nav/{code}")
-async def get_hist_nav(code: str, start_date: str = None):
+def get_hist_nav(code: str, start_date: str = None):
     data = market_data_service.get_historical_nav(code, start_date=start_date)
     return {"status": "ok", "data": data}
 
 @app.get("/api/market/historical/price/{code}")
-async def get_hist_price(code: str, start_date: str = None):
+def get_hist_price(code: str, start_date: str = None):
     data = market_data_service.get_historical_prices(code, start_date=start_date)
     return {"status": "ok", "data": data}
 
