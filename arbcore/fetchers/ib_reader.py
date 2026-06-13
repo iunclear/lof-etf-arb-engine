@@ -51,7 +51,7 @@ class IBReader(EWrapper, EClient):
         self.client_id = client_id if client_id is not None else random.randint(1000, 9999)
         self.on_price_update = on_price_update  # 注入回调函数解耦 SocketIO
         self.db_manager = db_manager # 注入数据库管理器
-        self.target_ports = [4001, 4002, 7496, 7497] 
+        self.target_ports = [int(port.strip()) for port in os.getenv('IB_PORTS', '4001,4002,7496,7497').split(',') if port.strip()]
         self.current_port_index = 0
         self.connected = False
         self.retry_delay = 1.0 
@@ -101,30 +101,36 @@ class IBReader(EWrapper, EClient):
         return self.req_id_counter
 
     def connect_to_ib(self):
-        target_port = self.target_ports[self.current_port_index]
-        print(f"[IBReader] 尝试连接 IB Gateway/TWS (端口: {target_port}, ClientId: {self.client_id})...")
-        try:
-            self.connect("127.0.0.1", target_port, clientId=self.client_id)
-            api_thread = threading.Thread(target=self.run, daemon=True)
-            api_thread.start()
-            time.sleep(2)
-            if self.isConnected():
-                self.connected = True
-                self.retry_delay = 1.0
-                print(f"[IBReader] [OK] 连接成功 (端口: {target_port})")
-                return True
-            else:
-                print(f"[IBReader] [ERROR] 连接失败 (端口: {target_port})")
+        if self.connected and self.isConnected():
+            return True
+        start_index = self.current_port_index
+        for i in range(len(self.target_ports)):
+            port_idx = (start_index + i) % len(self.target_ports)
+            target_port = self.target_ports[port_idx]
+            print(f"[IBReader] 尝试连接 IB Gateway/TWS (端口: {target_port}, ClientId: {self.client_id})...")
+            try:
+                self.connect("127.0.0.1", target_port, clientId=self.client_id)
+                api_thread = threading.Thread(target=self.run, daemon=True)
+                api_thread.start()
+                time.sleep(2)
+                if self.isConnected():
+                    self.connected = True
+                    self.retry_delay = 1.0
+                    self.current_port_index = port_idx
+                    print(f"[IBReader] [OK] 连接成功 (端口: {target_port})")
+                    return True
+                else:
+                    print(f"[IBReader] [ERROR] 连接失败 (端口: {target_port})")
+                    self.disconnect()
+                    self.connected = False
+                    time.sleep(0.5)
+            except Exception as e:
+                print(f"[IBReader] [ERROR] 连接异常 (端口: {target_port}): {e}")
                 self.disconnect()
                 self.connected = False
-                self.current_port_index = (self.current_port_index + 1) % len(self.target_ports)
-                return False
-        except Exception as e:
-            print(f"[IBReader] [ERROR] 连接异常 (端口: {target_port}): {e}")
-            self.disconnect()
-            self.connected = False
-            self.current_port_index = (self.current_port_index + 1) % len(self.target_ports)
-            return False
+                time.sleep(0.5)
+        self.current_port_index = (start_index + 1) % len(self.target_ports)
+        return False
 
     def disconnect_from_ib(self):
         if self.isConnected():

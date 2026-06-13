@@ -13,17 +13,17 @@ if os.path.exists(_lof_dir) and _lof_dir not in sys.path:
 try:
     from account_private import GJS_ACCOUNT
 except ImportError:
-    print("WARNING: account_private.py 不存在，请复制 account_example.py 并填入真实账号")
-    GJS_ACCOUNT = None
+    GJS_ACCOUNT = os.getenv('GJS_ACCOUNT')
+    if not GJS_ACCOUNT:
+        print("INFO: 未找到 account_private.py 且未配置 GJS_ACCOUNT，通达信交易功能将保持禁用")
 
 class TradeManager:
     """A股/LOF统一交易接口管理器"""
     def __init__(self):
         self.tdx_available = False
         self.tq = None
-        self.tqconst = None
-        self.tdx_account_id = None
-        
+        self.tdx_account = GJS_ACCOUNT
+
         # self.xtquant_available = False  # 国金QMT已注释，用户不使用
         # self.xt_trader = None
         # self.xt_account = None
@@ -36,33 +36,27 @@ class TradeManager:
     def _init_tdx(self):
         try:
             # 仅使用新版 tqcenter 路径
-            tdx_api_path = r'D:\new_tdx_test\PYPlugins\user'
-            
-            # 清除旧版缓存
-            if r'D:\new_tdx64\PYPlugins\user' in sys.path:
-                sys.path.remove(r'D:\new_tdx64\PYPlugins\user')
+            tdx_api_path = os.getenv('TDX_PLUGIN_DIR', r'C:\new_tdx64\PYPlugins\user')
+
             sys.path_importer_cache.clear()
             if 'tqcenter' in sys.modules:
                 del sys.modules['tqcenter']
-            
-            if os.path.exists(tdx_api_path):
+
+            if os.path.exists(tdx_api_path) and tdx_api_path not in sys.path:
                 sys.path.insert(0, tdx_api_path)
-            
-            from tqcenter import tq, tqconst
+
+            from tqcenter import tq
             self.tq = tq
-            self.tqconst = tqconst
-            
-            # 初始化并获取账户句柄
+
             tdx_plugin_path = os.path.join(tdx_api_path, 'tqcenter.py')
             tq.initialize(tdx_plugin_path)
-            self.tdx_account_id = tq.stock_account()
-            
-            if self.tdx_account_id and self.tdx_account_id > 0:
+
+            if self.tdx_account:
                 self.tdx_available = True
-                print(f"SUCCESS: [TradeManager] 已挂载【通达信】交易通道 (账户句柄: {self.tdx_account_id})")
+                print(f"SUCCESS: [TradeManager] 已挂载【通达信】交易通道 (账号配置已加载)")
             else:
-                print("WARNING: [TradeManager] 通达信账户句柄获取失败")
-                
+                print("WARNING: [TradeManager] tqcenter 已初始化，但缺少 GJS_ACCOUNT 账号配置，交易功能不可用")
+
         except ImportError as e:
             print(f"INFO: [TradeManager] 未检测到新版通达信环境(tqcenter): {e}")
         except Exception as e:
@@ -107,7 +101,7 @@ class TradeManager:
                 cmd_str = f"{action},{symbol},{volume},{price}\n"
                 client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                 client.settimeout(2.0)
-                client.connect(('127.0.0.1', 8888))
+                client.connect((os.getenv('GALAXY_QMT_HOST', '127.0.0.1'), int(os.getenv('GALAXY_QMT_PORT', '8888'))))
                 client.sendall(cmd_str.encode('utf-8'))
                 # 只取第一行（订单确认），忽略后续TICK广播数据
                 raw_response = client.recv(4096).decode('utf-8')
@@ -126,31 +120,34 @@ class TradeManager:
             return False, "国金QMT已禁用"  # 【国金QMT已注释】用户不使用
                 
         elif broker == 'tdx':
-            if not self.tdx_available: return False, "通达信接口未就绪"
+            if not self.tdx_available: return False, "通达信接口未就绪或缺少账号配置"
             try:
-                # 转换买卖方向: BUY=0(买入), SELL=1(卖出)
-                order_type = self.tqconst.STOCK_BUY if action == 'BUY' else self.tqconst.STOCK_SELL
-                
-                # 调用通达信下单接口
+                order_type = 0 if action == 'BUY' else 1
+                price_type = 0
+
                 result = self.tq.order_stock(
-                    account_id=self.tdx_account_id,
-                    stock_code=symbol,        # 动态基金代码，如 "162411.SZ"
+                    account=self.tdx_account,
+                    stock_code=symbol,
                     order_type=order_type,
                     order_volume=int(volume),
-                    price_type=self.tqconst.PRICE_MY,  # 限价单
-                    price=float(price)
+                    price_type=price_type,
+                    price=float(price),
+                    strategy_name="ArbDashboard",
+                    order_remark=""
                 )
-                
-                # 解析返回结果
-                error_id = result.get('ErrorId', -1)
-                msg = result.get('Msg', '未知')
-                
-                if result.get('Value') in [1, 2] or error_id == 0:
-                    wtbh = result.get('Wtbh', '')
+
+                if not isinstance(result, dict):
+                    return False, f"通达信下单失败: {result}"
+
+                error_id = str(result.get('ErrorId', result.get('ErrorID', -1)))
+                msg = result.get('Msg') or result.get('Error') or result.get('Message') or '未知'
+
+                if error_id == '0':
+                    wtbh = result.get('Wtbh') or result.get('OrderID') or result.get('Value') or ''
                     return True, f"通达信下单成功，委托编号: {wtbh}"
                 else:
                     return False, f"通达信下单失败: {msg}"
-                    
+
             except Exception as e:
                 return False, f"通达信下单异常: {str(e)}"
                 

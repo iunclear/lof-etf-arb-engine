@@ -1,4 +1,5 @@
 import logging
+import os
 from typing import List, Dict, Optional, Any
 from .base import BaseRealtimeFetcher
 from .guojin import GuojinQmtFetcher
@@ -65,7 +66,7 @@ class RealtimeMarketManager:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
             sock.settimeout(0.1)
             # 5000 是 LOF02_fetch_trade_data.py 的主端口
-            if sock.connect_ex(("127.0.0.1", 5000)) == 0:
+            if sock.connect_ex((os.getenv('LOF_HOST', '127.0.0.1'), int(os.getenv('LOF_PORT', '5000')))) == 0:
                 lof_is_running = True
                 
         if lof_is_running:

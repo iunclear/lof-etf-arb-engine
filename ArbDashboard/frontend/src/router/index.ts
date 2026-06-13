@@ -1,16 +1,7 @@
 import { createRouter, createWebHistory } from 'vue-router'
 import MainLayout from '../layouts/MainLayout.vue'
 import Dashboard from '../views/Dashboard.vue'
-
-const privateViews = import.meta.glob('../private/*.vue')
-
-const loadPrivateView = (name: string) => {
-  const path = `../private/${name}.vue`
-  if (privateViews[path]) {
-    return privateViews[path]
-  }
-  return () => import('../views/Placeholder.vue')
-}
+import Analysis from '../views/Analysis.vue'
 
 const router = createRouter({
   history: createWebHistory(),
@@ -28,27 +19,27 @@ const router = createRouter({
         {
           path: 'analysis',
           name: 'Analysis',
-          component: () => import('../views/Analysis.vue')
+          component: Analysis
         },
         {
           path: 'auto-trade',
           name: 'AutoTrade',
-          component: loadPrivateView('AutoTrade')
+          component: Analysis
         },
         {
           path: 'data',
           name: 'Data',
-          component: loadPrivateView('Data')
+          component: Dashboard
         },
         {
           path: 'ledger',
           name: 'Ledger',
-          component: loadPrivateView('Ledger')
+          component: Analysis
         },
         {
           path: 'settings',
           name: 'Settings',
-          component: loadPrivateView('Settings')
+          component: Dashboard
         }
       ]
     }

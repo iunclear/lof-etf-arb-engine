@@ -3,6 +3,7 @@ import threading
 import time
 import logging
 import json
+import os
 from typing import List, Dict, Optional, Any
 from .base import BaseRealtimeFetcher
 
@@ -14,10 +15,10 @@ class GalaxyQmtFetcher(BaseRealtimeFetcher):
     通过 Socket 8888 端口连接到 QMT 终端。
     """
     
-    def __init__(self, host='127.0.0.1', port=8888):
+    def __init__(self, host=None, port=None):
         super().__init__("Galaxy_QMT")
-        self.host = host
-        self.port = port
+        self.host = host or os.getenv('GALAXY_QMT_HOST', '127.0.0.1')
+        self.port = int(port or os.getenv('GALAXY_QMT_PORT', '8888'))
         self.sock = None
         self.running = False
         self.recv_thread = None

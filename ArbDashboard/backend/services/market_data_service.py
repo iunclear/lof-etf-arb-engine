@@ -80,14 +80,13 @@ class MarketDataService:
                 # IB已连接但prices中没有该symbol，启动轮询线程获取数据
                 if not getattr(self.ib_reader, 'running', False):
                     self.ib_reader.start_polling()
-                logger.info(f"⏳ IB正在获取{symbol}，请稍后...")
-                return None
+                logger.debug(f"⏳ IB正在获取{symbol}，尝试切换富途兜底...")
             elif self.ib_reader and not self.ib_reader.connected:
                 logger.debug(f"⚠️ IB未连接，美股ETF{symbol}将无法获取实时价格")
             else:
                 logger.debug(f"⚠️ IB Reader未初始化，美股ETF{symbol}将无法获取实时价格")
-            
-            # 2. [NEW] IB 不可用时，尝试富途
+
+            # 2. [NEW] IB 不可用或暂未出价时，尝试富途
             if self.futu_reader:
                 try:
                     success, msg, prices = self.futu_reader.get_prices([symbol])

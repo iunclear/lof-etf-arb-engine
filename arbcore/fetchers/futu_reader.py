@@ -7,6 +7,7 @@ futu_reader.py - 富途行情读取器模块
 """
 
 import time
+import os
 import pandas as pd
 import logging
 
@@ -28,15 +29,15 @@ class FutuReader:
     支持夜盘、盘前、盘后行情获取
     """
     
-    def __init__(self, host='127.0.0.1', port=11111):
+    def __init__(self, host=None, port=None):
         """
         Args:
             host: 富途 OpenD 地址
             port: 富途 OpenD 端口
         """
         self.ctx = None
-        self.host = host
-        self.port = port
+        self.host = host or os.getenv('FUTU_HOST', '127.0.0.1')
+        self.port = int(port or os.getenv('FUTU_PORT', '22222'))
         self.prices = {}  # {symbol: {'bid': ..., 'ask': ..., 'last': ...}}
         self.subscribed_codes = set()
         self.last_connect_time = 0

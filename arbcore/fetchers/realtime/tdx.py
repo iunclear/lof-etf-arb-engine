@@ -123,7 +123,7 @@ class TdxRealtimeFetcher(BaseRealtimeFetcher):
 
 
 
-            tdx_api_path = r'D:\new_tdx_test\PYPlugins\user'
+            tdx_api_path = os.getenv('TDX_PLUGIN_DIR', r'C:\new_tdx64\PYPlugins\user')
 
 
 

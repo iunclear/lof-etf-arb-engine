@@ -11,6 +11,25 @@ from contextlib import asynccontextmanager
 
 from datetime import datetime
 
+
+def load_env_file():
+    env_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', '.env'))
+    if not os.path.exists(env_path):
+        return
+    with open(env_path, 'r', encoding='utf-8') as f:
+        for raw_line in f:
+            line = raw_line.strip()
+            if not line or line.startswith('#') or '=' not in line:
+                continue
+            key, value = line.split('=', 1)
+            key = key.strip()
+            value = value.strip().strip('"').strip("'")
+            if key and key not in os.environ:
+                os.environ[key] = value
+
+
+load_env_file()
+
 # Setup logging
 backend_dir = os.path.dirname(os.path.abspath(__file__))
 workspace_root = os.path.abspath(os.path.join(backend_dir, ".."))
@@ -57,9 +76,11 @@ logger = logging.getLogger("ArbNext")
 # [Master-Slave] 检查主交易程序 (LOFarb) 是否运行
 import socket
 lof_is_running = False
+lof_host = os.getenv("LOF_HOST", "127.0.0.1")
+lof_port = int(os.getenv("LOF_PORT", "5000"))
 with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
     sock.settimeout(0.1)
-    if sock.connect_ex(("127.0.0.1", 5000)) == 0:
+    if sock.connect_ex((lof_host, lof_port)) == 0:
         lof_is_running = True
 
 # [V4.4] 强力补丁：全局唯一 TQ 抢占与锁定
@@ -68,67 +89,71 @@ if lof_is_running:
     logger.warning("[主从架构] 检测到主交易程序(LOFarb)正在运行！当前为只读监控模式(Slave)，主动跳过通达信(tdx)全局初始化。")
 else:
     try:
-        tq_plugin_path = r"D:\new_tdx_test\PYPlugins\user"
-        if tq_plugin_path not in sys.path:
-            sys.path.insert(0, tq_plugin_path)
-        
-        import tqcenter
-        from tqcenter import tq
-        
-        # 1. 注入 sys.modules 防止重复加载不同路径的同名模块
-        sys.modules['tqcenter'] = tqcenter
-        sys.modules['readers.tqcenter'] = tqcenter # 针对 LOFarb 的潜在导入路径
-        
-        # 2. 强制执行一次正确路径的初始化
-        if not getattr(tq, '_is_globally_initialized', False):
-            tq.initialize(tq_plugin_path)
-            tq._is_globally_initialized = True
-            logger.info(f"[Global] TQ 数据接口已全局抢占初始化: {tq_plugin_path}")
-            
-            # 3. 拦截并强制重定向后续所有初始化
-            def safe_initialize(path=None):
-                logger.info(f"[Global] 拦截并重定向重复的 TQ 初始化请求 (原请求路径: {path} -> 现强制路径: {tq_plugin_path})")
-                return True
-            tq.initialize = safe_initialize
-            
-            # 4. 终极防御：拦截 _get_run_id 以防止回调函数抛出 RuntimeError
-            #    注意：_get_run_id 是 classmethod，必须同时 patch 类字典才能拦截 cls._get_run_id() 调用
-            _orig_get_run_id = tq._get_run_id
-            def safe_get_run_id():
-                try:
-                    rid = _orig_get_run_id()
-                    if rid is None: return 1 # 强制返回一个 dummy ID
-                    return rid
-                except:
-                    return 1
-            tq._get_run_id = safe_get_run_id
-            # 同时通过类字典 patch，防止 cls._get_run_id() 绕过实例 patch
-            try:
-                type(tq)._get_run_id = staticmethod(safe_get_run_id)
-            except:
-                pass
-            
-            # 5. 拦截 _data_callback_transfer 回调，彻底阻断 RuntimeError 刷屏
-            _orig_callback = getattr(tq, '_data_callback_transfer', None)
-            if _orig_callback:
-                def safe_data_callback_transfer(*args, **kwargs):
+        tq_plugin_dir = os.getenv("TDX_PLUGIN_DIR", r"C:\new_tdx64\PYPlugins\user")
+        tq_plugin_path = os.path.join(tq_plugin_dir, "tqcenter.py")
+        if not os.path.exists(tq_plugin_path):
+            logger.warning(f"[Global] 未找到 tqcenter.py，跳过通达信全局初始化: {tq_plugin_path}")
+        else:
+            if tq_plugin_dir not in sys.path:
+                sys.path.insert(0, tq_plugin_dir)
+
+            import tqcenter
+            from tqcenter import tq
+
+            # 1. 注入 sys.modules 防止重复加载不同路径的同名模块
+            sys.modules['tqcenter'] = tqcenter
+            sys.modules['readers.tqcenter'] = tqcenter # 针对 LOFarb 的潜在导入路径
+
+            # 2. 强制执行一次正确路径的初始化
+            if not getattr(tq, '_is_globally_initialized', False):
+                tq.initialize(tq_plugin_path)
+                tq._is_globally_initialized = True
+                logger.info(f"[Global] TQ 数据接口已全局抢占初始化: {tq_plugin_path}")
+
+                # 3. 拦截并强制重定向后续所有初始化
+                def safe_initialize(path=None):
+                    logger.info(f"[Global] 拦截并重定向重复的 TQ 初始化请求 (原请求路径: {path} -> 现强制路径: {tq_plugin_path})")
+                    return True
+                tq.initialize = safe_initialize
+
+                # 4. 终极防御：拦截 _get_run_id 以防止回调函数抛出 RuntimeError
+                #    注意：_get_run_id 是 classmethod，必须同时 patch 类字典才能拦截 cls._get_run_id() 调用
+                _orig_get_run_id = tq._get_run_id
+                def safe_get_run_id():
                     try:
-                        return _orig_callback(*args, **kwargs)
-                    except RuntimeError:
-                        if not getattr(safe_data_callback_transfer, 'logged', False):
-                            logger.warning("[TDX] 回调中 _get_run_id RuntimeError 已被拦截（后续相同错误将静默）")
-                            safe_data_callback_transfer.logged = True
-                        return None
-                    except Exception:
-                        return None
-                safe_data_callback_transfer.logged = False
+                        rid = _orig_get_run_id()
+                        if rid is None: return 1 # 强制返回一个 dummy ID
+                        return rid
+                    except:
+                        return 1
+                tq._get_run_id = safe_get_run_id
+                # 同时通过类字典 patch，防止 cls._get_run_id() 绕过实例 patch
                 try:
-                    tq._data_callback_transfer = safe_data_callback_transfer
-                    type(tq)._data_callback_transfer = safe_data_callback_transfer
+                    type(tq)._get_run_id = staticmethod(safe_get_run_id)
                 except:
                     pass
+
+                # 5. 拦截 _data_callback_transfer 回调，彻底阻断 RuntimeError 刷屏
+                _orig_callback = getattr(tq, '_data_callback_transfer', None)
+                if _orig_callback:
+                    def safe_data_callback_transfer(*args, **kwargs):
+                        try:
+                            return _orig_callback(*args, **kwargs)
+                        except RuntimeError:
+                            if not getattr(safe_data_callback_transfer, 'logged', False):
+                                logger.warning("[TDX] 回调中 _get_run_id RuntimeError 已被拦截（后续相同错误将静默）")
+                                safe_data_callback_transfer.logged = True
+                            return None
+                        except Exception:
+                            return None
+                    safe_data_callback_transfer.logged = False
+                    try:
+                        tq._data_callback_transfer = safe_data_callback_transfer
+                        type(tq)._data_callback_transfer = safe_data_callback_transfer
+                    except:
+                        pass
     except Exception as e:
-        logger.error(f"[Global] TQ 全局初始化锁定失败: {e}")
+        logger.warning(f"[Global] TQ 全局初始化失败，后端将继续以禁用通达信交易的模式启动: {e}")
 
 # Add project root and core/arbcore to path
 # [FIX] 使用 D:\Study\arbTest\arbcore 作为核心模块目录
@@ -150,7 +175,14 @@ else:
         raise RuntimeError(f"既找不到 {arbcore_dir}，也找不到 {fallback_dir}")
 
 # 1. [V3.11 统一数据库路径]
-root_db_path = os.path.abspath(os.path.join(workspace_root, "..", "database", "arb_master.db"))
+def resolve_db_path():
+    db_path = os.getenv("ARB_DB_PATH")
+    if db_path:
+        return os.path.abspath(db_path)
+    return os.path.abspath(os.path.join(workspace_root, "..", "database", "arb_master_share.db"))
+
+
+root_db_path = resolve_db_path()
 logger.info(f"📂 Using database at {root_db_path}")
 
 # Define project root (ArbDashboard directory)
@@ -201,25 +233,10 @@ else:
         trading_service = TradingService(db)
         logger.info("交易服务已就绪 (独立模式)")
         
-        # [V4.7] 严防死守：若通达信未启动且不是从机模式，显示强力警告并中断程序启动 (仅限 Windows)
         if sys.platform == "win32" and (not trading_service.trade_manager or not getattr(trading_service.trade_manager, 'tdx_available', False)):
-            import sys
-            import time
-            print("\n" + "="*80)
-            print("!!! 致命错误：未检测到已成功连接的【通达信】交易账户！ !!!")
-            print("="*80)
-            print("👉 原因分析：")
-            print("   1. 本地【通达信客户端 (TdxW.exe)】尚未启动，或未成功登录交易账号。")
-            print("   2. tqcenter 插件无法取得有效的 stock_account 句柄。")
-            print("\n👉 解决办法：")
-            print("   1) 请先手动双击启动并登录【通达信交易客户端】。")
-            print("   2) 确保通达信的 tqcenter 插件成功载入。")
-            print("   3) 重新双击运行 start_dashboard.bat 启动看板系统。")
-            print("="*80)
-            print("正在安全退出系统后端服务，请按任意键关闭窗口并重启通达信...\n")
-            time.sleep(2)
-            sys.exit(1)
-            
+            logger.warning("通达信交易通道不可用，后端将继续以禁用交易功能的模式启动")
+            system_status.add_milestone("WARNING", "通达信交易通道不可用，交易功能已禁用")
+
     except SystemExit:
         sys.exit(1)
     except Exception as e:
@@ -287,8 +304,8 @@ async def lifespan(app: FastAPI):
                     logger.error(f"❌ 011 任务启动失败: {e}")
                     system_status.add_milestone("ERROR", f"011 任务启动失败: {e}")
             else:
-                logger.warning(f"⚠️ 011 脚本不存在: {script_path}")
-                system_status.add_milestone("WARNING", "011 脚本路径不存在")
+                logger.info(f"011 脚本不存在，跳过启动: {script_path}")
+                system_status.add_milestone("INFO", "011 脚本不存在，已跳过启动")
         
         asyncio.create_task(run_011_first())
 
@@ -736,6 +753,8 @@ async def reconnect_ib():
     if market_data_service.ib_reader:
         connected = market_data_service.ib_reader.connect_to_ib()
         if connected:
+            if not getattr(market_data_service.ib_reader, 'running', False):
+                market_data_service.ib_reader.start_polling()
             system_status.add_milestone("INFO", "IB 客户端已成功重连")
             return {"status": "ok", "message": "IB reconnected successfully"}
         else:
@@ -745,6 +764,7 @@ async def reconnect_ib():
         from arbcore.fetchers.ib_reader import IBReader
         market_data_service.ib_reader = IBReader(db_manager=db)
         if market_data_service.ib_reader.connect_to_ib():
+            market_data_service.ib_reader.start_polling()
             system_status.add_milestone("INFO", "IB 客户端已成功启动并连接")
             return {"status": "ok", "message": "IB initialized and connected"}
         else:
@@ -976,5 +996,7 @@ def kill_port_owner(port: int):
         logger.error(f"⚠️ [端口防护] 清理端口 {port} 残留进程失败: {e}")
 
 if __name__ == "__main__":
-    kill_port_owner(8000)
-    uvicorn.run(app, host="0.0.0.0", port=8000, log_level="info")
+    backend_host = os.getenv("BACKEND_HOST", "0.0.0.0")
+    backend_port = int(os.getenv("BACKEND_PORT", "8000"))
+    kill_port_owner(backend_port)
+    uvicorn.run(app, host=backend_host, port=backend_port, log_level="info")
