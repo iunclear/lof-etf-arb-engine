@@ -134,6 +134,7 @@ const currentTab = ref('自选')
 const engineRunning = ref(false)
 const watchlist = ref<string[]>(JSON.parse(localStorage.getItem('watchlist') || '[]'))
 let refreshTimer: any = null
+let fetching = false
 
 // 历史对账相关
 const showHistoryModal = ref(false)
@@ -533,11 +534,13 @@ const tableScrollX = computed(() => {
 })
 
 const fetchData = async (isSilent = false) => {
+  if (fetching) return
+  fetching = true
   if (!isSilent) loading.value = true
   try {
     const params: any = {}
     const highFreqTabs = ['自选', '黄金原油', 'QDII欧美']
-    
+
     // 如果处于高频更新 Tab，拼装 watchlist 参数以减小后端处理负荷
     if (highFreqTabs.includes(currentTab.value)) {
       let codes: string[] = []
@@ -559,22 +562,27 @@ const fetchData = async (isSilent = false) => {
     }
 
     const [dashRes, marketRes, milestoneRes, engineRes] = await Promise.all([
-      axios.get('/api/dashboard', { params }), 
-      axios.get('/api/market/overview'), 
-      axios.get('/api/system/milestones'), 
+      axios.get('/api/dashboard', { params }),
+      axios.get('/api/market/overview'),
+      axios.get('/api/system/milestones'),
       axios.get('/api/auto_trade/status')
     ])
     if (dashRes.data?.status === 'ok') tableData.value = dashRes.data.data || []
     if (marketRes.data?.status === 'ok') marketOverview.value = marketRes.data.data || marketOverview.value
     if (milestoneRes.data?.status === 'ok') milestones.value = milestoneRes.data.data || []
     if (engineRes.data?.status === 'ok') engineRunning.value = engineRes.data.running
-  } catch (err) { console.error('获取数据失败', err) } finally { loading.value = false }
+  } catch (err) {
+    console.error('获取数据失败', err)
+  } finally {
+    fetching = false
+    loading.value = false
+  }
 }
 
 const setupRefreshTimer = () => {
   if (refreshTimer) clearInterval(refreshTimer)
   const highFreqTabs = ['自选', '黄金原油', 'QDII欧美']
-  const interval = highFreqTabs.includes(currentTab.value) ? 3000 : 30000
+  const interval = highFreqTabs.includes(currentTab.value) ? 10000 : 30000
   refreshTimer = setInterval(() => fetchData(true), interval)
 }
 
